@@ -24,11 +24,34 @@ export interface Stakeholder {
   role: "champion" | "economic_buyer" | "technical_buyer" | "influencer" | "blocker";
 }
 
+// Normalized signals pre-computed before rules run (per PRD)
+export interface DealSignals {
+  contactCount: number;
+  decisionMakerPresent: boolean;
+  crossFunctionalContactPresent: boolean;
+  daysSinceLastActivity: number;
+  daysInStage: number;
+  nextStepScheduled: boolean;
+  budgetDiscussed: boolean;
+  metricsMentioned: boolean;
+  newValueSentPostDemo: boolean;
+  timelineDefined: boolean;
+  consequenceOfInactionDefined: boolean;
+  discoverySummaryPresent: boolean;
+}
+
+export interface RuleMatch {
+  ruleId: string;
+  severity: Severity;
+}
+
 export interface Diagnosis {
   code: DiagnosisCode;
   severity: Severity;
+  confidence: number;
   evidence: string[];
   explanation: string;
+  matchedRules: string[];
 }
 
 export interface RecommendedAction {

@@ -112,7 +112,7 @@ export function DealDiagnosisPanel({ deal, onClose }: DealDiagnosisPanelProps) {
           <CardContent className="space-y-4">
             {deal.diagnosis ? (
               <>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <Badge
                     variant="outline"
                     className={cn("font-medium", severityConfig[deal.diagnosis.severity].class)}
@@ -122,6 +122,9 @@ export function DealDiagnosisPanel({ deal, onClose }: DealDiagnosisPanelProps) {
                   </Badge>
                   <Badge variant="secondary" className="font-medium">
                     {DIAGNOSIS_LABELS[deal.diagnosis.code]}
+                  </Badge>
+                  <Badge variant="outline" className="font-mono text-xs">
+                    {Math.round(deal.diagnosis.confidence * 100)}% confidence
                   </Badge>
                 </div>
 
@@ -142,6 +145,14 @@ export function DealDiagnosisPanel({ deal, onClose }: DealDiagnosisPanelProps) {
                     ))}
                   </ul>
                 </div>
+
+                {deal.diagnosis.matchedRules && deal.diagnosis.matchedRules.length > 0 && (
+                  <div className="pt-2 border-t border-border/50">
+                    <p className="text-xs text-muted-foreground">
+                      Matched rules: <span className="font-mono">{deal.diagnosis.matchedRules.join(", ")}</span>
+                    </p>
+                  </div>
+                )}
               </>
             ) : (
               <div className="text-center py-6">
