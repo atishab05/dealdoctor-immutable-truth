@@ -1,109 +1,124 @@
-import { Deal, Diagnosis, DiagnosisCode, RecommendedAction, Severity } from "@/types/deal";
+import { Deal, Diagnosis, DiagnosisCode, RecommendedAction } from "@/types/deal";
+import { computeSignals } from "./signals";
+import {
+  evaluateRules,
+  calculateConfidence,
+  getHighestSeverity,
+  collectEvidence,
+  DIAGNOSIS_EXECUTION_ORDER,
+} from "./rules";
 
-// Rules-based diagnosis engine as specified in PRD
+/**
+ * Deterministic diagnosis engine.
+ * Implements exact rules from PRD - no LLM modifications allowed.
+ * 
+ * Execution order (per PRD):
+ * 1. Sales Process Gaps - Hygiene issues distort all other signals
+ * 2. Single-Threaded Deal - Structural blockers first
+ * 3. No Economic Buyer
+ * 4. No Clear Business Impact
+ * 5. Weak Urgency
+ * 6. No New Value Introduced - Messaging issues last
+ * 
+ * Returns: Primary diagnosis (highest priority) + secondary diagnoses
+ */
 export function diagnoseDeal(deal: Deal): Diagnosis | null {
-  const diagnoses: { code: DiagnosisCode; severity: Severity; evidence: string[] }[] = [];
+  // Step 1: Compute normalized signals
+  const signals = computeSignals(deal);
 
-  // Rule 1: Single-Threaded Deal
-  if (deal.stakeholders.length <= 1) {
+  // Step 2: Evaluate all rules
+  const ruleMatches = evaluateRules(signals);
+
+  if (ruleMatches.size === 0) {
+    return null;
+  }
+
+  // Step 3: Build diagnoses sorted by execution order, severity, confidence
+  const diagnoses: Diagnosis[] = [];
+
+  for (const code of DIAGNOSIS_EXECUTION_ORDER) {
+    const matches = ruleMatches.get(code);
+    if (!matches || matches.length === 0) continue;
+
+    const severity = getHighestSeverity(matches);
+    const confidence = calculateConfidence(code, matches);
+    const evidence = collectEvidence(matches);
+    const matchedRules = matches.map((m) => m.ruleId);
+
     diagnoses.push({
-      code: "SINGLE_THREADED",
-      severity: deal.daysInactive > 14 ? "critical" : "high",
-      evidence: [
-        `Only ${deal.stakeholders.length} contact associated with deal`,
-        deal.daysInactive > 7 ? `Deal stalled for ${deal.daysInactive} days` : "",
-      ].filter(Boolean),
+      code,
+      severity,
+      confidence,
+      evidence,
+      explanation: generateExplanation(code, deal),
+      matchedRules,
     });
   }
 
-  // Rule 2: No Economic Buyer
-  const hasEconomicBuyer = deal.stakeholders.some(
-    (s) =>
-      s.role === "economic_buyer" ||
-      /\b(cfo|ceo|vp|director|founder|head of|chief)\b/i.test(s.title)
-  );
-  if (!hasEconomicBuyer && deal.stakeholders.length > 0) {
-    diagnoses.push({
-      code: "NO_ECONOMIC_BUYER",
-      severity: deal.stage === "negotiation" ? "critical" : "high",
-      evidence: [
-        "No stakeholder with budget authority identified",
-        "Missing Finance / Founder / VP / Director titles",
-      ],
-    });
-  }
-
-  // Rule 3: No Clear Business Impact
-  const impactKeywords = /\b(roi|revenue|cost|savings|efficiency|impact|metrics|%|million|thousand|\$)\b/i;
-  if (!impactKeywords.test(deal.notes)) {
-    diagnoses.push({
-      code: "NO_BUSINESS_IMPACT",
-      severity: "medium",
-      evidence: [
-        "No quantified metrics mentioned in notes",
-        "Missing ROI, cost savings, or efficiency data",
-      ],
-    });
-  }
-
-  // Rule 4: No New Value (post-demo stagnation)
-  if (
-    (deal.stage === "demo" || deal.stage === "proposal") &&
-    deal.daysInactive > 7
-  ) {
-    const recentValue = /\b(case study|example|insight|benchmark|new|update)\b/i;
-    if (!recentValue.test(deal.notes)) {
-      diagnoses.push({
-        code: "NO_NEW_VALUE",
-        severity: "medium",
-        evidence: [
-          "No new assets shared post-demo",
-          "No fresh insights or customer examples provided",
-        ],
-      });
-    }
-  }
-
-  // Rule 5: Weak Urgency
-  const urgencyKeywords = /\b(deadline|urgent|asap|this quarter|this month|timeline|priority)\b/i;
-  const delayKeywords = /\b(later|next year|revisit|someday|no rush|backburner)\b/i;
-  if (delayKeywords.test(deal.notes) || !urgencyKeywords.test(deal.notes)) {
-    diagnoses.push({
-      code: "WEAK_URGENCY",
-      severity: deal.daysInactive > 30 ? "high" : "medium",
-      evidence: [
-        "No clear timeline established",
-        delayKeywords.test(deal.notes) ? "Buyer indicated low priority" : "No urgency keywords in notes",
-      ],
-    });
-  }
-
-  // Rule 6: Sales Process Gaps
-  const processKeywords = /\b(discovery|use case|next step|meeting|call scheduled)\b/i;
-  if (!processKeywords.test(deal.notes) && deal.stage !== "discovery") {
-    diagnoses.push({
-      code: "SALES_PROCESS_GAPS",
-      severity: "medium",
-      evidence: [
-        "No discovery summary documented",
-        "Missing next meeting or step confirmation",
-      ],
-    });
-  }
-
-  // Return highest severity diagnosis
   if (diagnoses.length === 0) return null;
 
-  const severityOrder: Severity[] = ["critical", "high", "medium", "low"];
-  diagnoses.sort(
-    (a, b) => severityOrder.indexOf(a.severity) - severityOrder.indexOf(b.severity)
-  );
+  // Step 4: Sort by severity, then execution order, then confidence
+  const severityOrder = { high: 0, medium: 1, low: 2, critical: -1 };
+  
+  diagnoses.sort((a, b) => {
+    // Primary: Severity
+    const sevDiff = severityOrder[a.severity] - severityOrder[b.severity];
+    if (sevDiff !== 0) return sevDiff;
 
-  const primary = diagnoses[0];
-  return {
-    ...primary,
-    explanation: generateExplanation(primary.code, deal),
-  };
+    // Secondary: Execution order
+    const orderDiff =
+      DIAGNOSIS_EXECUTION_ORDER.indexOf(a.code) -
+      DIAGNOSIS_EXECUTION_ORDER.indexOf(b.code);
+    if (orderDiff !== 0) return orderDiff;
+
+    // Tertiary: Confidence (higher first)
+    return b.confidence - a.confidence;
+  });
+
+  // Return primary diagnosis
+  return diagnoses[0];
+}
+
+/**
+ * Get all diagnoses for a deal (primary + secondary).
+ * Max 1 primary + up to 2 secondary per PRD.
+ */
+export function getAllDiagnoses(deal: Deal): Diagnosis[] {
+  const signals = computeSignals(deal);
+  const ruleMatches = evaluateRules(signals);
+
+  if (ruleMatches.size === 0) return [];
+
+  const diagnoses: Diagnosis[] = [];
+
+  for (const code of DIAGNOSIS_EXECUTION_ORDER) {
+    const matches = ruleMatches.get(code);
+    if (!matches || matches.length === 0) continue;
+
+    diagnoses.push({
+      code,
+      severity: getHighestSeverity(matches),
+      confidence: calculateConfidence(code, matches),
+      evidence: collectEvidence(matches),
+      explanation: generateExplanation(code, deal),
+      matchedRules: matches.map((m) => m.ruleId),
+    });
+  }
+
+  // Sort and limit to 3 (1 primary + 2 secondary)
+  const severityOrder = { high: 0, medium: 1, low: 2, critical: -1 };
+  
+  diagnoses.sort((a, b) => {
+    const sevDiff = severityOrder[a.severity] - severityOrder[b.severity];
+    if (sevDiff !== 0) return sevDiff;
+    const orderDiff =
+      DIAGNOSIS_EXECUTION_ORDER.indexOf(a.code) -
+      DIAGNOSIS_EXECUTION_ORDER.indexOf(b.code);
+    if (orderDiff !== 0) return orderDiff;
+    return b.confidence - a.confidence;
+  });
+
+  return diagnoses.slice(0, 3);
 }
 
 function generateExplanation(code: DiagnosisCode, deal: Deal): string {
@@ -118,7 +133,10 @@ function generateExplanation(code: DiagnosisCode, deal: Deal): string {
   return explanations[code];
 }
 
-// Map diagnosis to recommended actions (playbooks from PRD)
+/**
+ * Generate recommended actions based on diagnosis.
+ * Maps diagnosis to playbooks from PRD.
+ */
 export function generateActions(diagnosis: Diagnosis, deal: Deal): RecommendedAction[] {
   const actions: RecommendedAction[] = [];
 
