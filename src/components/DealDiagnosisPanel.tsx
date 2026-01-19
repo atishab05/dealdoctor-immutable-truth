@@ -3,7 +3,6 @@ import { useDealsStore } from "@/stores/deals-store";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
 import {
   X,
   Stethoscope,
@@ -16,6 +15,7 @@ import {
   RefreshCw,
   Bell,
 } from "lucide-react";
+import { PlaybookExecutor } from "./PlaybookExecutor";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -166,6 +166,11 @@ export function DealDiagnosisPanel({ deal, onClose }: DealDiagnosisPanelProps) {
             )}
           </CardContent>
         </Card>
+
+        {/* Playbook Executor */}
+        {deal.diagnosis && (
+          <PlaybookExecutor deal={deal} diagnosis={deal.diagnosis} />
+        )}
 
         {/* Recommended Actions */}
         {deal.recommendedActions.length > 0 && (
