@@ -1,1 +1,4 @@
 project_id = "lrjuywcftrgnuzgujngj"
+
+[functions.execute-playbook]
+verify_jwt = false

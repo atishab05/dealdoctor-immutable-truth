@@ -10,7 +10,9 @@ import {
   buildPlaybookInput,
   buildPrompt,
   LLM_SYSTEM_MESSAGE,
+  validateOutput,
 } from "@/lib/playbooks";
+import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -59,6 +61,7 @@ export function PlaybookExecutor({ deal, diagnosis }: PlaybookExecutorProps) {
   const [tone, setTone] = useState<TonePreference>("direct");
   const [channel, setChannel] = useState<ChannelPreference>("email");
   const [output, setOutput] = useState<string>("");
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [copied, setCopied] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
@@ -68,22 +71,54 @@ export function PlaybookExecutor({ deal, diagnosis }: PlaybookExecutorProps) {
 
     setIsGenerating(true);
     setOutput("");
+    setWarnings([]);
 
-    // Build the prompt (this is what would go to the LLM)
-    const input = buildPlaybookInput(selectedPlaybook, deal, diagnosis, {
-      tone,
-      channel,
-    });
-    const prompt = buildPrompt(selectedPlaybook, input);
+    try {
+      // Build the prompt for the LLM
+      const input = buildPlaybookInput(selectedPlaybook, deal, diagnosis, {
+        tone,
+        channel,
+      });
+      const userPrompt = buildPrompt(selectedPlaybook, input);
 
-    // Simulate LLM response for demo (in production, this calls the LLM API)
-    await new Promise((r) => setTimeout(r, 1500));
+      // Call the edge function
+      const { data, error } = await supabase.functions.invoke("execute-playbook", {
+        body: {
+          systemMessage: LLM_SYSTEM_MESSAGE,
+          userPrompt,
+          playbookId: selectedPlaybook,
+        },
+      });
 
-    // Generate mock output based on playbook
-    const mockOutput = generateMockOutput(selectedPlaybook, deal, diagnosis, tone, channel);
-    setOutput(mockOutput);
-    setIsGenerating(false);
-    toast.success("Playbook executed");
+      if (error) {
+        console.error("Edge function error:", error);
+        toast.error(error.message || "Failed to execute playbook");
+        return;
+      }
+
+      if (data?.error) {
+        toast.error(data.error);
+        return;
+      }
+
+      const content = data?.content || "";
+      setOutput(content);
+      
+      // Validate output against quality bars
+      const outputWarnings = validateOutput(selectedPlaybook, content);
+      setWarnings(outputWarnings);
+      
+      if (outputWarnings.length > 0) {
+        toast.warning(`Generated with ${outputWarnings.length} warning(s)`);
+      } else {
+        toast.success("Playbook executed successfully");
+      }
+    } catch (err) {
+      console.error("Error executing playbook:", err);
+      toast.error("Failed to execute playbook");
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   const handleCopy = () => {
@@ -284,6 +319,26 @@ export function PlaybookExecutor({ deal, diagnosis }: PlaybookExecutorProps) {
               </div>
             )}
 
+            {/* Validation Warnings */}
+            {warnings.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-status-warning flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  Quality Warnings Detected
+                </p>
+                <div className="space-y-1">
+                  {warnings.map((warning, i) => (
+                    <div
+                      key={i}
+                      className="text-xs p-2 bg-status-warning/10 rounded border border-status-warning/20"
+                    >
+                      {warning}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="flex items-start gap-2 p-3 bg-status-warning/10 rounded-lg border border-status-warning/20">
               <AlertTriangle className="w-4 h-4 text-status-warning shrink-0 mt-0.5" />
               <p className="text-xs text-muted-foreground">
@@ -298,117 +353,3 @@ export function PlaybookExecutor({ deal, diagnosis }: PlaybookExecutorProps) {
   );
 }
 
-/**
- * Mock output generator for demo purposes.
- * In production, this would be replaced by actual LLM API call.
- */
-function generateMockOutput(
-  playbookId: PlaybookId,
-  deal: Deal,
-  diagnosis: Diagnosis,
-  tone: TonePreference,
-  channel: ChannelPreference
-): string {
-  const stakeholder = deal.stakeholders[0];
-  const stakeholderName = stakeholder?.name || "[Contact Name]";
-
-  const outputs: Record<PlaybookId, string> = {
-    multi_thread: `WARM INTRO REQUEST
----
-Hi ${stakeholderName},
-
-${tone === "executive" ? "I wanted to" : tone === "direct" ? "Quick ask:" : "Hope you're doing well."} ${tone === "direct" ? "c" : "C"}onnect with someone on your team who handles [specific area based on their role].
-
-Given our conversation about ${deal.notes?.slice(0, 50) || "your initiative"}..., I think it would be valuable to include their perspective early.
-
-Would you be open to making an introduction?
-
----
-COLD OUTREACH (if target identified)
----
-Subject: ${deal.companyName} - [Specific Area] perspective
-
-Hi [New Contact Name],
-
-${stakeholderName} and I have been discussing [initiative]. Given your role in [their department], your input would be valuable.
-
-Would you have 15 minutes this week?`,
-
-    business_impact: `COST OF INACTION FRAMING
----
-Consider what happens if this initiative doesn't move forward:
-
-• The challenge you described around [reference from notes] continues
-• Your team keeps spending time on [current manual process]
-• The gap between where you are and where you want to be widens
-
----
-CLARIFYING QUESTIONS
----
-1. How is [the current challenge] affecting your team's day-to-day?
-2. What happens to your [specific goal] if this isn't addressed this quarter?`,
-
-    introduce_new_value: `NEW VALUE ANGLE
----
-Since our last conversation, I've been thinking about ${deal.companyName}'s situation...
-
-Rather than rehash what we covered in the demo, I wanted to share a different angle:
-
-[One specific insight relevant to their industry/situation]
-
----
-DRAFT MESSAGE
----
-Subject: A different angle for ${deal.companyName}
-
-Hi ${stakeholderName},
-
-I came across something that made me think of our conversation. 
-
-[Share the new insight/perspective — not a feature, but a way of thinking about their problem]
-
-Thought it might be useful as you evaluate next steps.
-
-Happy to discuss if helpful.`,
-
-    sales_hygiene: `INTERNAL CHECKLIST (not for buyer)
----
-Before re-engaging ${deal.companyName}:
-
-[ ] Review discovery notes — do I have documented answers to:
-    - Business problem/pain?
-    - Impact of not solving?
-    - Decision timeline?
-    - Budget holder identified?
-
-[ ] Confirm next steps are clear:
-    - What did we agree to do next?
-    - Who is responsible for what?
-    - When was this supposed to happen?
-
-[ ] Check stakeholder coverage:
-    - Economic buyer engaged? ${deal.stakeholders.some(s => s.role === "economic_buyer") ? "✓ Yes" : "✗ No"}
-    - Champion identified? ${deal.stakeholders.some(s => s.role === "champion") ? "✓ Yes" : "✗ No"}
-    - Any blockers known? ${deal.stakeholders.some(s => s.role === "blocker") ? "⚠ Yes" : "Unknown"}
-
-[ ] Prepare value summary before outreach
-[ ] Have a specific reason for reaching out (not "checking in")`,
-
-    create_urgency: `TIMELINE CLARIFICATION MESSAGE
----
-Hi ${stakeholderName},
-
-I wanted to follow up on our conversation about ${deal.notes?.slice(0, 30) || "your initiative"}...
-
-To make sure I'm aligned with your timeline: are you looking to have a solution in place by a specific date, or is this more exploratory at this stage?
-
----
-CLOSE-ENDED QUESTION
----
-"Are you targeting Q1 or Q2 for implementation?"
-
-(Adjust based on current quarter — gives them two options without pressure)`,
-  };
-
-  return outputs[playbookId] || "Playbook output will appear here.";
-}
